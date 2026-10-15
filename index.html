@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Touhou Survivors: EoSD Infinite Edition - HARD MODE</title>
+    <title>Touhou Survivors: EoSD Infinite Edition - Adaptive</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Google Fonts -->
@@ -188,7 +188,7 @@
             <h1 class="title-font text-4xl md:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-rose-400 to-cyan-300 glow-text tracking-wider">
                 TOUHOU SURVIVORS
             </h1>
-            <p class="text-amber-200/90 text-xs md:text-sm tracking-widest mt-1 font-bold">EMBODIMENT OF SCARLET DEVIL • HARD MODE • TRUE DANMAKU</p>
+            <p class="text-amber-200/90 text-xs md:text-sm tracking-widest mt-1 font-bold">EMBODIMENT OF SCARLET DEVIL • ADAPTIVE DANMAKU</p>
         </div>
 
         <!-- Character Selection Grid -->
@@ -210,9 +210,9 @@
         <!-- Footer / Start Button -->
         <div class="flex flex-col items-center space-y-2 mb-2">
             <button id="btnStart" onclick="startGame()" class="touhou-btn px-12 py-3 rounded-full text-amber-200 font-black text-lg tracking-widest cursor-pointer shadow-xl">
-                ¡INICIAR DANMAKU HARD!
+                ¡INICIAR DANMAKU!
             </button>
-            <div class="text-xs text-rose-400/90">HARD MODE: Danmaku denso, hitbox minúscula, i-frames cortos, jefes brutales. ¡Buena suerte!</div>
+            <div class="text-xs text-cyan-300/90">Dificultad adaptativa: si vas bien sube la presión; si estás al límite se suaviza.</div>
         </div>
     </div>
 
@@ -727,6 +727,23 @@
         let chestsOpened = 0;
         let lastTime = 0;
 
+        // --- ADAPTIVE DIFFICULTY SYSTEM ---
+        // Tracks how well the player is doing and scales pressure accordingly.
+        // Range roughly 0.55 (struggling) → 1.65 (dominating)
+        let adaptive = {
+            level: 1.0,           // current difficulty multiplier
+            target: 1.0,          // smoothed target
+            performance: 0.5,     // 0 = dying, 1 = stomping
+            hitsRecent: 0,        // hits taken in last few seconds
+            timeSinceHit: 10,     // seconds since last damage
+            killsRecent: 0,
+            grazeRecent: 0,
+            updateTimer: 0,
+            lastKills: 0,
+            lastGraze: 0,
+            smooth: 0.08          // how fast difficulty drifts toward target
+        };
+
         // Player Instance in World Coordinates
         let player = {
             worldX: 0,
@@ -887,7 +904,7 @@
             player.maxShield = 0;
             player.level = 1;
             player.xp = 0;
-            player.maxXp = 20;
+            player.maxXp = 25;
             player.bombs = 2;
             player.damageMult = 0.75;
             player.fireRateMult = 1;
@@ -912,6 +929,18 @@
             graze = 0;
             chestsOpened = 0;
             enemySpawnTimer = 0;
+
+            // Reset adaptive difficulty
+            adaptive.level = 1.0;
+            adaptive.target = 1.0;
+            adaptive.performance = 0.5;
+            adaptive.hitsRecent = 0;
+            adaptive.timeSinceHit = 10;
+            adaptive.killsRecent = 0;
+            adaptive.grazeRecent = 0;
+            adaptive.updateTimer = 0;
+            adaptive.lastKills = 0;
+            adaptive.lastGraze = 0;
 
             updateHudPortrait();
             updateSpellCardHUD();
@@ -949,9 +978,22 @@
             document.getElementById('hpBar').style.width = `${Math.max(0, (player.hp / player.maxHp) * 100)}%`;
             document.getElementById('xpBar').style.width = `${(player.xp / player.maxXp) * 100}%`;
             document.getElementById('levelText').innerText = player.level;
+            // Show adaptive difficulty label on stage line when no boss
+            if (!boss) {
+                let diffLabel = adaptive.level < 0.75 ? 'Fácil' : (adaptive.level < 1.05 ? 'Normal' : (adaptive.level < 1.35 ? 'Difícil' : 'Lunatic'));
+                document.getElementById('stageText').innerText = `DIFF: ${diffLabel} (${adaptive.level.toFixed(2)})`;
+            }
 
             if (player.invincibleTimer > 0) player.invincibleTimer -= dt;
             if (player.timeStopTimer > 0) player.timeStopTimer -= dt;
+
+            // --- Adaptive difficulty evaluation ---
+            adaptive.timeSinceHit += dt;
+            adaptive.updateTimer += dt;
+            if (adaptive.updateTimer >= 1.5) {
+                adaptive.updateTimer = 0;
+                updateAdaptiveDifficulty();
+            }
 
             // Frog Passive Regeneration (weaker in Hard)
             if (player.passives.frog > 0) {
@@ -1002,22 +1044,25 @@
                 }
             }
 
-            // Spawning Enemies around the Player on Infinite Map - HARD: relentless pressure
+            // Spawning Enemies - base curve scaled by adaptive difficulty
             if (!boss) {
                 enemySpawnTimer += dt;
-                // Much more aggressive spawn curve (Touhou-style density)
-                let spawnRate = Math.max(0.045, 0.55 - (gameTime / 45) * 0.28);
+                // Base spawn interval shrinks with time, then multiplied by adaptive (higher = faster spawns)
+                let baseInterval = Math.max(0.07, 0.70 - (gameTime / 50) * 0.32);
+                let spawnRate = baseInterval / Math.max(0.55, adaptive.level);
                 if (enemySpawnTimer >= spawnRate) {
                     enemySpawnTimer = 0;
-                    let count = Math.min(18, 4 + Math.floor(gameTime / 12));
+                    let baseCount = 3 + Math.floor(gameTime / 15);
+                    let count = Math.min(16, Math.round(baseCount * (0.7 + adaptive.level * 0.45)));
                     for (let i = 0; i < count; i++) {
                         spawnEnemyAroundPlayer();
                     }
                 }
 
-                // Touhou 6 Boss Spawns Stage Progression (earlier + tighter)
-                let bossTriggers = [45, 110, 180, 260, 340, 430, 530];
-                if (currentBossIndex < touhou6Bosses.length && gameTime >= bossTriggers[currentBossIndex]) {
+                // Boss triggers slightly earlier when player is dominating
+                let bossTriggers = [48, 115, 190, 270, 355, 445, 545];
+                let timeBonus = adaptive.level > 1.15 ? (adaptive.level - 1.0) * 12 : 0;
+                if (currentBossIndex < touhou6Bosses.length && gameTime + timeBonus >= bossTriggers[currentBossIndex]) {
                     spawnBoss();
                 }
             }
@@ -1214,25 +1259,95 @@
             }
         }
 
+        // Evaluate player performance and adjust difficulty target
+        function updateAdaptiveDifficulty() {
+            const hpRatio = player.hp / player.maxHp;
+            const bombRatio = player.bombs / Math.max(1, player.maxBombs);
+
+            // Recent activity deltas
+            const newKills = kills - adaptive.lastKills;
+            const newGraze = graze - adaptive.lastGraze;
+            adaptive.lastKills = kills;
+            adaptive.lastGraze = graze;
+            adaptive.killsRecent = adaptive.killsRecent * 0.6 + newKills * 0.4;
+            adaptive.grazeRecent = adaptive.grazeRecent * 0.6 + newGraze * 0.4;
+
+            // Performance score (0 = struggling, 1 = dominating)
+            let perf = 0.5;
+            // HP is the strongest signal
+            if (hpRatio > 0.75) perf += 0.22;
+            else if (hpRatio > 0.45) perf += 0.08;
+            else if (hpRatio < 0.25) perf -= 0.30;
+            else if (hpRatio < 0.40) perf -= 0.15;
+
+            // Time without taking hits rewards clean play
+            if (adaptive.timeSinceHit > 12) perf += 0.18;
+            else if (adaptive.timeSinceHit > 6) perf += 0.08;
+            else if (adaptive.timeSinceHit < 2.5) perf -= 0.12;
+
+            // Recent hits punish
+            if (adaptive.hitsRecent >= 3) perf -= 0.20;
+            else if (adaptive.hitsRecent >= 1) perf -= 0.08;
+            adaptive.hitsRecent = Math.max(0, adaptive.hitsRecent - 0.7);
+
+            // Kill / graze activity
+            if (adaptive.killsRecent > 8) perf += 0.12;
+            else if (adaptive.killsRecent < 2 && gameTime > 30) perf -= 0.06;
+            if (adaptive.grazeRecent > 6) perf += 0.10;
+
+            // Bombs left: hoarding = doing well; empty = pressure
+            if (bombRatio >= 0.75) perf += 0.06;
+            else if (bombRatio <= 0.25) perf -= 0.08;
+
+            // Level progress relative to time (slightly rewards fast leveling)
+            const expectedLevel = 1 + gameTime / 45;
+            if (player.level > expectedLevel + 1) perf += 0.08;
+            else if (player.level < expectedLevel - 1.5 && gameTime > 40) perf -= 0.05;
+
+            perf = Math.max(0.05, Math.min(0.95, perf));
+            adaptive.performance = adaptive.performance * 0.65 + perf * 0.35;
+
+            // Map performance → difficulty target
+            // 0.3 perf → ~0.60 diff | 0.5 → 1.0 | 0.8 → ~1.55
+            adaptive.target = 0.55 + adaptive.performance * 1.25;
+            // Soft floor rises slowly with time so late game is never trivial
+            const timeFloor = Math.min(0.95, 0.55 + gameTime / 500);
+            adaptive.target = Math.max(timeFloor, Math.min(1.70, adaptive.target));
+
+            // Smooth toward target
+            adaptive.level += (adaptive.target - adaptive.level) * adaptive.smooth;
+            adaptive.level = Math.max(0.55, Math.min(1.70, adaptive.level));
+        }
+
         function spawnEnemyAroundPlayer() {
             let angle = Math.random() * Math.PI * 2;
             let dist = Math.max(canvas.width, canvas.height) / 2 + 80 + Math.random() * 180;
             let ex = player.worldX + Math.cos(angle) * dist;
             let ey = player.worldY + Math.sin(angle) * dist;
 
+            const d = adaptive.level;
             let roll = Math.random();
-            let isKedama = roll < 0.40;
-            let isElite = roll > 0.88; // Rare elite fairies with denser fire
+            // Elite chance scales with difficulty
+            let eliteChance = 0.06 + (d - 0.7) * 0.12;
+            let isKedama = roll < 0.38;
+            let isElite = roll > (1 - eliteChance);
+
+            let baseHp = isElite ? 140 : (isKedama ? 48 : 85);
+            let hp = Math.round(baseHp * (0.75 + d * 0.35));
+            let baseSpeed = isElite ? 2.0 : (isKedama ? 2.9 : 2.05);
+            let speed = baseSpeed * (0.85 + d * 0.22);
+            let baseInterval = isElite ? 1.05 : (isKedama ? 1.55 : 2.0);
+            // Higher difficulty → shoot more often
+            let shootInterval = baseInterval / (0.75 + d * 0.35);
 
             enemies.push({
                 worldX: ex, worldY: ey,
-                hp: isElite ? 160 : (isKedama ? 55 : 95),
-                maxHp: isElite ? 160 : (isKedama ? 55 : 95),
-                speed: isElite ? 2.1 : (isKedama ? 3.1 : 2.2),
+                hp: hp, maxHp: hp,
+                speed: speed,
                 radius: isKedama ? 10 : (isElite ? 16 : 14),
                 sprite: isKedama ? 'kedama' : 'fairy',
-                shootTimer: Math.random() * 1.2,
-                shootInterval: isElite ? 0.9 : (isKedama ? 1.4 : 1.8),
+                shootTimer: Math.random() * shootInterval,
+                shootInterval: shootInterval,
                 isElite: isElite,
                 dead: false
             });
@@ -1240,11 +1355,20 @@
 
         function fireEnemyDanmaku(en) {
             let angle = Math.atan2(player.worldY - en.worldY, player.worldX - en.worldX);
-            // HARD: multi-bullet aimed + slight spread (classic fairy fire)
-            let count = en.isElite ? 5 : (en.sprite === 'kedama' ? 1 : 3);
-            let spread = en.isElite ? 0.28 : 0.18;
+            const d = adaptive.level;
+
+            // Bullet count and speed scale with adaptive difficulty
+            let baseCount = en.isElite ? 4 : (en.sprite === 'kedama' ? 1 : 2);
+            let extra = d > 1.15 ? 1 : (d > 1.35 ? 2 : 0);
+            if (en.isElite && d > 1.25) extra += 1;
+            let count = baseCount + extra;
+            // When struggling (low d), fairies sometimes fire only 1 bullet
+            if (d < 0.75 && !en.isElite && en.sprite !== 'kedama' && Math.random() < 0.45) count = 1;
+
+            let spread = en.isElite ? 0.26 : 0.16;
             let start = angle - ((count - 1) * spread) / 2;
-            let spd = en.isElite ? 5.2 : (en.sprite === 'kedama' ? 4.6 : 4.1);
+            let baseSpd = en.isElite ? 4.6 : (en.sprite === 'kedama' ? 4.2 : 3.7);
+            let spd = baseSpd * (0.80 + d * 0.30);
 
             for (let i = 0; i < count; i++) {
                 let a = start + i * spread;
@@ -1252,9 +1376,10 @@
                     worldX: en.worldX, worldY: en.worldY,
                     vx: Math.cos(a) * spd,
                     vy: Math.sin(a) * spd,
-                    radius: en.isElite ? 6 : 4.5,
+                    radius: en.isElite ? 5.5 : 4.2,
                     color: en.isElite ? '#f97316' : (en.sprite === 'kedama' ? '#c084fc' : '#f43f5e'),
-                    grazed: false, damage: en.isElite ? 14 : 11
+                    grazed: false,
+                    damage: en.isElite ? 13 : 10
                 });
             }
         }
@@ -1266,9 +1391,12 @@
             let bx = player.worldX + Math.cos(angle) * 300;
             let by = player.worldY + Math.sin(angle) * 300;
 
+            // Boss HP scales mildly with current adaptive level
+            let hpScale = 0.80 + adaptive.level * 0.28;
+            let scaledHp = Math.round(bossData.hp * hpScale);
             boss = {
                 worldX: bx, worldY: by,
-                hp: bossData.hp, maxHp: bossData.hp,
+                hp: scaledHp, maxHp: scaledHp,
                 radius: 32,
                 name: bossData.name, title: bossData.title,
                 sprite: bossData.sprite,
@@ -1347,37 +1475,44 @@
             boss.shootTimer += dt;
             boss.patternAngle += dt * (boss.phase === 3 ? 2.8 : 2.1);
 
-            // HARD MODE: denser, multi-layer Touhou-style patterns
-            let fireRate = boss.phase === 1 ? 0.14 : (boss.phase === 2 ? 0.11 : 0.08);
+            // Patterns scaled by adaptive difficulty (struggling → slower/sparser, dominating → denser)
+            let d = adaptive.level;
+            let baseRate = boss.phase === 1 ? 0.16 : (boss.phase === 2 ? 0.13 : 0.10);
+            // Higher adaptive.level → faster fire; low level gives breathing room
+            let fireRate = baseRate / (0.70 + d * 0.40);
             if (boss.shootTimer >= fireRate) {
                 boss.shootTimer = 0;
                 let ph = boss.phase;
+                // Density factor for bullet counts (0.7–1.35)
+                let dens = Math.max(0.7, Math.min(1.35, 0.55 + d * 0.55));
 
                 if (boss.sprite === 'rumia') {
                     // Spiral + aimed dark rays
-                    let count = ph === 1 ? 10 : (ph === 2 ? 16 : 22);
+                    let count = Math.round((ph === 1 ? 10 : (ph === 2 ? 16 : 22)) * dens);
                     for (let i = 0; i < count; i++) {
                         let a = boss.patternAngle + (i * 2 * Math.PI) / count;
-                        let spd = 3.6 + ph * 0.6;
+                        let spd = (3.6 + ph * 0.6) * (0.85 + d * 0.18);
                         bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, radius: 5.5, color: '#7c3aed', grazed: false, damage: 12 });
                     }
                     // Aimed extra ring
                     if (ph >= 2) {
-                        for (let i = -3; i <= 3; i++) {
+                        let aimN = dens > 0.9 ? 3 : 2;
+                        for (let i = -aimN; i <= aimN; i++) {
                             let a = angleToPlayer + i * 0.12;
                             bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 5.5, vy: Math.sin(a) * 5.5, radius: 4.5, color: '#a855f7', grazed: false, damage: 11 });
                         }
                     }
                 } else if (boss.sprite === 'cirno') {
                     // Dense icicle spreads + counter-clockwise rings
-                    let spreadCount = ph === 1 ? 9 : (ph === 2 ? 14 : 19);
+                    let spreadCount = Math.round((ph === 1 ? 9 : (ph === 2 ? 14 : 19)) * dens);
                     for (let i = -spreadCount; i <= spreadCount; i++) {
                         let a = angleToPlayer + i * (0.055 + ph * 0.008);
-                        bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * (4.8 + ph * 0.4), vy: Math.sin(a) * (4.8 + ph * 0.4), radius: 4.5, color: '#38bdf8', grazed: false, damage: 11 });
+                        let spd = (4.8 + ph * 0.4) * (0.85 + d * 0.18);
+                        bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, radius: 4.5, color: '#38bdf8', grazed: false, damage: 11 });
                     }
                     // Secondary spinning ring
                     if (ph >= 2) {
-                        let ring = 12 + ph * 4;
+                        let ring = Math.round((12 + ph * 4) * dens);
                         for (let i = 0; i < ring; i++) {
                             let a = -boss.patternAngle * 1.3 + (i * 2 * Math.PI) / ring;
                             bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 3.2, vy: Math.sin(a) * 3.2, radius: 5, color: '#7dd3fc', grazed: false, damage: 10 });
@@ -1385,29 +1520,29 @@
                     }
                 } else if (boss.sprite === 'meiling') {
                     // Double flower rings + aimed petals
-                    let bloom = ph === 1 ? 18 : (ph === 2 ? 24 : 32);
+                    let bloom = Math.round((ph === 1 ? 18 : (ph === 2 ? 24 : 32)) * dens);
                     for (let i = 0; i < bloom; i++) {
                         let a = boss.patternAngle + (i * 2 * Math.PI) / bloom;
                         let color = i % 2 === 0 ? '#10b981' : '#f43f5e';
                         bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 3.5, vy: Math.sin(a) * 3.5, radius: 5.5, color: color, grazed: false, damage: 11 });
                     }
                     // Counter-rotating inner ring
-                    for (let i = 0; i < bloom / 2; i++) {
-                        let a = -boss.patternAngle * 0.7 + (i * 2 * Math.PI) / (bloom / 2);
+                    for (let i = 0; i < Math.floor(bloom / 2); i++) {
+                        let a = -boss.patternAngle * 0.7 + (i * 2 * Math.PI) / Math.max(1, bloom / 2);
                         bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 2.6, vy: Math.sin(a) * 2.6, radius: 4, color: '#fbbf24', grazed: false, damage: 10 });
                     }
                 } else if (boss.sprite === 'patchouli') {
                     // Multi-element star + orbiting lasers
-                    let arms = 5 + ph;
+                    let arms = Math.round((5 + ph) * Math.min(1.2, dens));
                     for (let i = 0; i < arms; i++) {
                         let a = boss.patternAngle + (i * 2 * Math.PI) / arms;
                         for (let s = 0; s < 3; s++) {
-                            let spd = 3.8 + s * 1.1 + ph * 0.3;
+                            let spd = (3.8 + s * 1.1 + ph * 0.3) * (0.85 + d * 0.15);
                             bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, radius: 6 + s, color: s === 0 ? '#eab308' : (s === 1 ? '#a855f7' : '#ef4444'), grazed: false, damage: 12 });
                         }
                     }
                     // Random aimed bursts
-                    if (ph >= 2 && Math.random() < 0.4) {
+                    if (ph >= 2 && Math.random() < (0.25 + dens * 0.25)) {
                         for (let i = -2; i <= 2; i++) {
                             let a = angleToPlayer + i * 0.18;
                             bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 6.5, vy: Math.sin(a) * 6.5, radius: 5, color: '#f472b6', grazed: false, damage: 13 });
@@ -1415,10 +1550,11 @@
                     }
                 } else if (boss.sprite === 'sakuya') {
                     // Knife walls + timed aimed spreads (classic Sakuya)
-                    let knives = ph === 1 ? 9 : (ph === 2 ? 13 : 17);
+                    let knives = Math.round((ph === 1 ? 9 : (ph === 2 ? 13 : 17)) * dens);
                     for (let i = -Math.floor(knives/2); i <= Math.floor(knives/2); i++) {
                         let a = angleToPlayer + i * (0.11 - ph * 0.01);
-                        bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * (5.8 + ph * 0.5), vy: Math.sin(a) * (5.8 + ph * 0.5), radius: 4.5, color: '#e2e8f0', grazed: false, damage: 12 });
+                        let spd = (5.8 + ph * 0.5) * (0.85 + d * 0.18);
+                        bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, radius: 4.5, color: '#e2e8f0', grazed: false, damage: 12 });
                     }
                     // Side knife curtains
                     if (ph >= 2) {
@@ -1431,10 +1567,11 @@
                     }
                 } else if (boss.sprite === 'remilia') {
                     // Gungnir-style dense rings + cross spears
-                    let ring = ph === 1 ? 20 : (ph === 2 ? 28 : 36);
+                    let ring = Math.round((ph === 1 ? 20 : (ph === 2 ? 28 : 36)) * dens);
                     for (let i = 0; i < ring; i++) {
                         let a = boss.patternAngle + (i * 2 * Math.PI) / ring;
-                        bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 4.0, vy: Math.sin(a) * 4.0, radius: 5.5, color: '#dc2626', grazed: false, damage: 12 });
+                        let spd = 4.0 * (0.85 + d * 0.18);
+                        bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, radius: 5.5, color: '#dc2626', grazed: false, damage: 12 });
                     }
                     // Fast cross lasers aimed
                     for (let i = 0; i < 4; i++) {
@@ -1442,24 +1579,25 @@
                         bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 7.2, vy: Math.sin(a) * 7.2, radius: 6, color: '#f43f5e', grazed: false, damage: 14 });
                     }
                     if (ph >= 3) {
-                        // Extra random scatter
-                        for (let i = 0; i < 12; i++) {
+                        let scatter = Math.round(12 * dens);
+                        for (let i = 0; i < scatter; i++) {
                             let a = Math.random() * Math.PI * 2;
                             bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 3.5, vy: Math.sin(a) * 3.5, radius: 4, color: '#fb7185', grazed: false, damage: 10 });
                         }
                     }
                 } else {
                     // Flandre: chaotic multi-speed rainbow spirals (U.N. Owen feel)
-                    let count = ph === 1 ? 18 : (ph === 2 ? 26 : 36);
+                    let count = Math.round((ph === 1 ? 18 : (ph === 2 ? 26 : 36)) * dens);
                     let colors = ['#ef4444', '#f59e0b', '#eab308', '#22c55e', '#3b82f6', '#a855f7', '#ec4899'];
                     for (let i = 0; i < count; i++) {
                         let a = boss.patternAngle + (i * 2 * Math.PI) / count;
-                        let spd = 3.2 + (i % 5) * 0.7 + ph * 0.4;
+                        let spd = (3.2 + (i % 5) * 0.7 + ph * 0.4) * (0.85 + d * 0.18);
                         bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, radius: 5, color: colors[i % colors.length], grazed: false, damage: 13 });
                     }
                     // Reverse spiral layer
-                    for (let i = 0; i < count / 2; i++) {
-                        let a = -boss.patternAngle * 1.4 + (i * 2 * Math.PI) / (count / 2);
+                    let half = Math.max(4, Math.floor(count / 2));
+                    for (let i = 0; i < half; i++) {
+                        let a = -boss.patternAngle * 1.4 + (i * 2 * Math.PI) / half;
                         bullets.push({ worldX: boss.worldX, worldY: boss.worldY, vx: Math.cos(a) * 2.8, vy: Math.sin(a) * 2.8, radius: 4.5, color: colors[(i + 3) % colors.length], grazed: false, damage: 11 });
                     }
                 }
@@ -1639,6 +1777,10 @@
                 player.invincibleTimer = 0.65; // Very short i-frames like real Touhou
                 playSound('hit');
                 spawnFloatingText(player.worldX, player.worldY, `-${amount}`, "#f43f5e");
+
+                // Feed adaptive system: player is under pressure
+                adaptive.hitsRecent += 1;
+                adaptive.timeSinceHit = 0;
 
                 if (player.hp <= 0) triggerGameOver();
             }
@@ -1835,4 +1977,4 @@
         };
     </script>
 </body>
-  </html>
+</html>
